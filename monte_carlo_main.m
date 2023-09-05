@@ -7,19 +7,58 @@ function [] = monte_carlo_main(ncores,varargin)
 %
 % This file conducts Monte Carlo Simulations for project "Robust Test Score
 % for Incomplete Models with Nuisance Parameters"
+rng(123)
+S = 1999; % number of simulations for each sample size
+parpool(ncores)
 
-%% Setting Parameters
-% In each sample we will draw X from this vector uniformly with replacement
+% Size evaluation
 covariate = [1, -1];
 % true value of nuisance parameters
 delta = [0.25, 0.25];
+level = 0.05; % nominal size
+N = [2500, 5000, 7500];
+J = length(N);
+X = [1,1; 1,-1; -1,1; -1,-1]; % combination of covariates
+% pre-allocation to store g_delta statstics and sup test statistic
+gn = zeros(2*length(N), S);
+test = zeros(length(N), S);
+outcome_com = zeros(16,S,length(N));
+delta_hat_com1 = zeros(length(N),S);
+delta_hat_com2 = zeros(length(N),S);
+cv = zeros(length(N),S);
+for j = 1:length(N) % loop over sample size
+    n = N(j);
+    % Call data_generation function to generate data
+    [data_com, x1_com, x2_com] = data_generation([0, 0], covariate, ...
+        delta, n, S, 'Complete');
+    outcome_com(:,:,j) = counting(data_com, x1_com, x2_com);
+    % loop over number of simulations
+    gn_temp = zeros(2,S);
+    parfor i = 1:S
+        % Conduct Restricted MLE
+        delta_hat_com = rmle([0,0], n, 'BFGS', data_com(:,i), x1_com(:,i), x2_com(:,i));
+        delta_hat_com1(j,i) = delta_hat_com(1);
+        delta_hat_com2(j,i) = delta_hat_com(2);
+        % generate var-cov matrices and gn statistics (generated under the null beta=0)
+        %[test(j,i),gn_temp(:,i), varI] = stat(delta_hat_com, X, outcome_com(:,i,j), n,lambda);
+        [test(j,i),gn_temp(:,i), varI] = stat_ab(delta_hat_com, X, outcome_com(:,i,j), n);
+        cv(j,i) = crt_ab(level,varI);
+    end
+    gn((2*j-1):(2*j),:) = gn_temp;
+end
+rej = test > cv;
+size = sum(rej,2)./S;
+disp(size)
+filename = ['../Results/Matfiles/test_crt_S' num2str(S) '.mat'];
+save(filename)
 
+
+
+
+
+%% Power Evaluation
 %% Random Number Generation %%
 rng(123); % set seed
-S = 1999; %1999 % number of simulations for each sample size
-parpool(ncores)
-
-level = 0.05; % nominal size
 n = 7500;
 X = [1,1; 1,-1; -1,1; -1,-1]; % combination of covariates
 DGP = 'LFP';
@@ -57,7 +96,7 @@ end
 
 
 % 5/21/2020 Shuowen Chen and Hiroaki Kaido
-% Generates data 
+% Generates data
 % When beta is 0 (null), model is complete, no selection needed, use
 % 'Complete' instead
 % When beta is not 0 (alternative), model features multiple equilibria,
@@ -71,13 +110,13 @@ function [data, x1, x2] = data_generation(beta, covariate, delta, n, S, selectio
 %   n:          sample size
 %   S:          number of simulations
 %   selection:  equilibrium selection mechanism
-%  Output:  
+%  Output:
 %   data:       the generated dataset (n by S). Each column denotes one
-%               monte carlo simulation with sample size n. 
+%               monte carlo simulation with sample size n.
 %   x1:         sampled x for the first player (n by S)
 %   x2:         sampled x for the second player (n by S)
 
-% generate a sequence of x 
+% generate a sequence of x
 x = randsample(covariate, n*2*S, true);
 x1 = reshape(x(1:(n*S)), n, S);
 x2 = reshape(x((n*S+1):length(x)), n, S);
@@ -107,7 +146,7 @@ if strcmp(selection, 'IID')
     % iid Bernoulli r.v vi takes 1, and (0,1) if vi takes 0.
     % Random numbers from standard normal distribution
     % Define the Bernoulli r.v: threshold value to create Bernoulli variables
-    alpha = 0.05; 
+    alpha = 0.05;
     vi = rand(n,S) <= alpha;
     % placeholder for data
     G_result = NaN(n, S);
@@ -153,29 +192,29 @@ end
 
 % Define auxiliary functions.
 function [Q0, Q1] = get_LFP(beta, xdelta1, xdelta2)
-% Purpose: The function calculates the analytical LFP given beta and Xdelta. 
+% Purpose: The function calculates the analytical LFP given beta and Xdelta.
 % Inputs:
 %   beta:  structural parameters of interest
 %   xdelta1: n by S matrix
 %   xdelta2: n by S matrix
 % Outputs:
 %   Q0:     Distribution under the null [q0_00, q0_11, q0_10, q0_01],
-%           Dimension: nS by 4. 
+%           Dimension: nS by 4.
 %   Q1:     Distribution under the alternative [q1_00, q1_11, q1_10, q1_01],
-%           Dimension: nS by 4. 
+%           Dimension: nS by 4.
 
 dim = size(xdelta1);
 % sample size
 n = dim(1);
 % number of MC
 S = dim(2);
-% Each of the following four objects are n by S. 
+% Each of the following four objects are n by S.
 Phi1 = normcdf(xdelta1);
 Phi2 = normcdf(xdelta2);
 Phi_beta1 = normcdf(xdelta1 + beta(1));
 Phi_beta2 = normcdf(xdelta2 + beta(2));
-% Within a MC, Q0 is identical arocss all subcases. 
-% The Q0 below is a n*S by 4 matrix 
+% Within a MC, Q0 is identical arocss all subcases.
+% The Q0 below is a n*S by 4 matrix
 Q0 = [reshape((1-Phi1).*(1-Phi2),n*S,1), reshape(Phi1.*Phi2,n*S,1),...
     reshape(Phi1.*(1-Phi2),n*S,1), reshape((1-Phi1).*Phi2,n*S,1)];
 % Depending on the values of beta, we have three cases to
@@ -183,7 +222,7 @@ Q0 = [reshape((1-Phi1).*(1-Phi2),n*S,1), reshape(Phi1.*Phi2,n*S,1),...
 % consider the regions. Given each local alternative, we can evaluate
 % the conditions and thus determine which subregion the given local
 % alternative belongs to. First define the 5 variables used in the
-% conditions. All 5 variables are n by S. 
+% conditions. All 5 variables are n by S.
 var1 = Phi1.*(1-Phi_beta2);
 z1 = Phi1.*(1-Phi2);
 z2 = Phi2.*(1-Phi1) + Phi1 + Phi2 - Phi1.*Phi2 - Phi_beta1.*Phi_beta2;
@@ -207,27 +246,27 @@ evaluation = [cond1, cond2, cond3];
 % Now based on the evaluation, calculate Q1 for each obs. Instead of
 % evaluating each obs case-by-case (using if else), we first calculate Q1
 % in each of the three subcases. This gives us three nS by 4 matrices. Then
-% we dot multiply each of them with the corresponding column in the evaluation 
-% matrix and sum them up. This gives us the nS by 4 matrix of LFP for all obs 
+% we dot multiply each of them with the corresponding column in the evaluation
+% matrix and sum them up. This gives us the nS by 4 matrix of LFP for all obs
 % (S Monte Carlos each with sample size n).
 
 % First calculate Q1 in each case
 % Q1 in case 1: Mixture over (1, 0) and (0, 1)
 Q1_1 = [reshape((1-Phi1).*(1-Phi2), n*S, 1),...
-        reshape(Phi_beta1.*Phi_beta2, n*S, 1),...
-        reshape((z1.*z2-Phi2.*(1-Phi1).*z1)./(Phi1+Phi2-2*Phi1.*Phi2), n*S, 1),...
-        reshape(Phi1+Phi2-Phi1.*Phi2-Phi_beta1.*Phi_beta2 - ...
-        (z1.*z2-Phi2.*(1-Phi1).*z1)./(Phi1+Phi2-2*Phi1.*Phi2), n*S, 1)];
+    reshape(Phi_beta1.*Phi_beta2, n*S, 1),...
+    reshape((z1.*z2-Phi2.*(1-Phi1).*z1)./(Phi1+Phi2-2*Phi1.*Phi2), n*S, 1),...
+    reshape(Phi1+Phi2-Phi1.*Phi2-Phi_beta1.*Phi_beta2 - ...
+    (z1.*z2-Phi2.*(1-Phi1).*z1)./(Phi1+Phi2-2*Phi1.*Phi2), n*S, 1)];
 % Q1 in case 2: (0, 1) chosen
 Q1_2 = [reshape((1-Phi1).*(1-Phi2), n*S, 1),...
-        reshape(Phi_beta1.*Phi_beta2, n*S, 1), ...
-        reshape((1-Phi2).*Phi1+Phi_beta1.*(Phi2-Phi_beta2), n*S, 1),...
-        reshape((1-Phi_beta1).*Phi2, n*S, 1)];
+    reshape(Phi_beta1.*Phi_beta2, n*S, 1), ...
+    reshape((1-Phi2).*Phi1+Phi_beta1.*(Phi2-Phi_beta2), n*S, 1),...
+    reshape((1-Phi_beta1).*Phi2, n*S, 1)];
 % Q1 in case 3: (1, 0) chosen
 Q1_3 = [reshape((1-Phi1).*(1-Phi2), n*S, 1),...
-      reshape(Phi_beta1.*Phi_beta2, n*S, 1),...
-      reshape(Phi1.*(1-Phi_beta2), n*S, 1),...
-      reshape((1-Phi1).*Phi2+Phi_beta2.*(Phi1-Phi_beta1), n*S, 1)];
+    reshape(Phi_beta1.*Phi_beta2, n*S, 1),...
+    reshape(Phi1.*(1-Phi_beta2), n*S, 1),...
+    reshape((1-Phi1).*Phi2+Phi_beta2.*(Phi1-Phi_beta1), n*S, 1)];
 % Now get Q1 for each obs (nS by 4)
 Q1 = evaluation(:,1).*Q1_1 + evaluation(:,2).*Q1_2 + evaluation(:,3).*Q1_3;
 end
@@ -244,7 +283,7 @@ function [delta] = rmle(delta_initial, n, algorithm, data, x1, x2)
 %                   occurrences of each combination of events and covariate
 %                   configurations
 %   algorithm:      the algorithm for estimation: BFGS, LM-BFGS or BHHH
-% Output: 
+% Output:
 %   delta:          estimates of parameters (1 by 2)
 
 % Compute the outcome for each configuration combination of x and delta
@@ -309,11 +348,11 @@ end
 
 % 5/26/2020 Shuowen Chen and Hiroaki Kaido
 % Computes the neg log likelihood function and gradient
-% -- Inputs --  
+% -- Inputs --
 %  data:    market outcome (n by 1)
 %  x1:      covariate for player 1 (n by 1)
 %  x2:      covariate for player 2 (n by 1)
-%  delta:   nuisance parameter (for estimation purpose): 2 by 1 
+%  delta:   nuisance parameter (for estimation purpose): 2 by 1
 %  outcome: frequencies of covariate and outcome combinations (16 by 1)
 % -- Outputs --
 %  f:       negative log likelihood function
@@ -335,7 +374,7 @@ temp = [temp1, temp2, temp3, temp4];
 % objective function
 f = -sum(sum(temp .* q0));
 % gradient required
-if nargout > 1 
+if nargout > 1
     % Call compute_z_all to get zdelta, 2 by 16.
     [zdelta, ~] = compute_z_all([0, 0], [1,1; 1,-1; -1,1; -1,-1], delta);
     % Compute sum of score functions (2 by 1)
@@ -347,7 +386,7 @@ end
 end
 
 function Q0 = get_LFP_q0(x1, x2, delta)
-% Purpose: The function calculates the analytical LFP given and Xdelta. 
+% Purpose: The function calculates the analytical LFP given and Xdelta.
 % Inputs:
 %   beta:  structural parameters of interest
 %   x1:    covariate of player 1; n by 1 matrix
@@ -355,7 +394,7 @@ function Q0 = get_LFP_q0(x1, x2, delta)
 %   delta: nuisance parameter; 1 by 2
 % Outputs:
 %   Q0:     Distribution under the null [q0_00, q0_11, q0_10, q0_01],
-%           Dimension: nS by 4. 
+%           Dimension: nS by 4.
 xdelta1 = x1*delta(1);
 xdelta2 = x2*delta(2);
 dim = size(xdelta1);
@@ -363,11 +402,11 @@ dim = size(xdelta1);
 n = dim(1);
 % number of MC
 S = dim(2);
-% Each of the following four objects are n by S. 
+% Each of the following four objects are n by S.
 Phi1 = normcdf(xdelta1);
 Phi2 = normcdf(xdelta2);
-% Within a MC, Q0 is identical arocss all subcases. 
-% The Q0 below is a n*S by 4 matrix 
+% Within a MC, Q0 is identical arocss all subcases.
+% The Q0 below is a n*S by 4 matrix
 Q0 = [reshape((1-Phi1).*(1-Phi2),n*S,1), reshape(Phi1.*Phi2,n*S,1),...
     reshape(Phi1.*(1-Phi2),n*S,1), reshape((1-Phi1).*Phi2,n*S,1)];
 end
@@ -430,8 +469,8 @@ betablock = betablock * occurrence / n;
 
 % Reshape to be 2 by 2
 I_beta2 = reshape(betablock, 2, 2);
-g_delta = Cbeta; 
-varI = I_beta2; 
+g_delta = Cbeta;
+varI = I_beta2;
 varI = get_sigmatilde(varI);
 
 gtilde = varI^(-0.5)*g_delta;
@@ -460,14 +499,14 @@ end
 
 % 5/28/2020 Shuowen Chen and Hiroaki Kaido
 % The function computes the analytical z_delta and z_beta, an ingredient of
-% the scores. Note the outputs are conditional on the value of x. 
+% the scores. Note the outputs are conditional on the value of x.
 function [z_delta, z_beta] = compute_z_all(beta, x, delta)
-% Input: 
+% Input:
 %  beta:   structural parameter of interest (1 by 2 vector)
 %  x:      Covariates (4 by 2) [1,1; 1,-1; -1,1; -1,-1].
 %  delta:  nuisance parameter (2 by 1)
 %
-% Output: 
+% Output:
 %  z_delta: a 2 by 16 matrix with the following form
 %                          x = [1,1]         |    x=[1,-1]        ...
 %                 (0, 0) (1, 1) (1, 0) (0, 1)| (0, 0) ... (0, 1)
@@ -479,7 +518,7 @@ function [z_delta, z_beta] = compute_z_all(beta, x, delta)
 %           beta1                            |
 %           beta2                            |
 delta = delta';
-% All of the following variables are 4 by 2. 
+% All of the following variables are 4 by 2.
 xdelta = x.*delta;
 phi = normpdf(xdelta);
 Phi = normcdf(xdelta);
@@ -492,9 +531,9 @@ zdelta_00 = -phi.*x./(1-Phi);
 zbeta_11 = phi_beta./Phi_beta;
 zdelta_11 = phi_beta.*x./Phi_beta;
 
-% For events (1, 0) and (0, 1), for each configuration of Xdelta, 
-% there are three subcases to consider. We have six conditions 
-%(two of which are repetitive) to consider the regions. 
+% For events (1, 0) and (0, 1), for each configuration of Xdelta,
+% there are three subcases to consider. We have six conditions
+%(two of which are repetitive) to consider the regions.
 % Given each local alternative, we can evaluate the conditions and thus
 % determine which subregion the given local alternative belongs to.
 % First define the 5 variables used in the conditions
@@ -515,7 +554,7 @@ zdelta_1001 = zeros(2, 2*dim(1));
 zbeta_1001 = zeros(2, 2*dim(1));
 for i = 1:dim(1) % loop over covariate configurations
     % (0,1) chosen
-    if var4(i) + var3(i) - var5(i) > var2(i) && var1(i) > var3(i) + var4(i) - var5(i) 
+    if var4(i) + var3(i) - var5(i) > var2(i) && var1(i) > var3(i) + var4(i) - var5(i)
 
         q1_10 = Phi(i,1)*(1-Phi(i,2))+Phi_beta(i,1)*Phi(i,2)-Phi_beta(i,1)*Phi_beta(i,2);
 
@@ -534,9 +573,9 @@ for i = 1:dim(1) % loop over covariate configurations
 
         zbeta1_01 = -phi_beta(i,1)/(1-Phi_beta(i,1));
 
-        zbeta2_01 = 0; 
-    % (1,0) chosen    
-    elseif var1(i) < var2(i) && var1(i) - var3(i) - var4(i) + var5(i) > 0 
+        zbeta2_01 = 0;
+        % (1,0) chosen
+    elseif var1(i) < var2(i) && var1(i) - var3(i) - var4(i) + var5(i) > 0
 
         q1_01 = (1-Phi(i,1))*Phi(i,2) + Phi_beta(i,2)*(Phi(i,1)-Phi_beta(i,1));
 
@@ -562,10 +601,10 @@ for i = 1:dim(1) % loop over covariate configurations
         denominator1 = Phi(i,1)+Phi(i,2)-Phi(i,1)*Phi(i,2)-Phi_beta(i,1)*Phi_beta(i,2);
 
         denominator2 =  Phi(i,1)+Phi(i,2)-2*Phi(i,1)*Phi(i,2);
-        
+
         zdelta1_10 = phi(i,1)*x(i,1)/Phi(i,1) + (phi(i,1)*x(i,1)-phi(i,1)*x(i,1)*Phi(i,2)-...
             phi_beta(i,1)*Phi_beta(i,2)*x(i,1))/denominator1 - (phi(i,1)*x(i,1)*(1-2*Phi(i,2)))/denominator2;
-        
+
         zdelta2_10 = -phi(i,2)*x(i,2)/(1-Phi(i,2)) + (phi(i,2)*x(i,2)-phi(i,2)*Phi(i,1)*x(i,2)-...
             phi_beta(i,2)*Phi_beta(i,1)*x(i,2))/denominator1 - (phi(i,2)*x(i,2)*(1-2*Phi(i,1)))/denominator2;
 
@@ -602,8 +641,8 @@ end
 end
 
 % 11/16/2019 Shuowen Chen and Hiroaki Kaido
-% Counts the number of occurrences for each of the possible combination of 
-% events and configurations of covariates. 
+% Counts the number of occurrences for each of the possible combination of
+% events and configurations of covariates.
 % Four potential outcomes: (0, 0), (1, 1), (1, 0) and (0, 1);
 % Four covariate combinations: (1, 1), (1, -1), (-1, 1) and (-1, -1).
 function outcome = counting(data, x1, x2)
@@ -662,3 +701,25 @@ sim_stat = first-second;
 crit = quantile(sim_stat, (1-nominal));
 end
 
+% 5/20/2020
+% Shuowen Chen and Hiroaki Kaido
+% A function that calculates the critical values of the simulated Tn
+% statistics
+function [real, l] = actualsize(test_matrix, N, cv)
+% Outputs:
+% real: the actual size
+% l: (auxiliary output) length of sequence (some simulations end up producing NA values, 
+%    so compute l to have a sense how severe the issue is)
+real = zeros(length(N), 1); % actual size placeholder
+l = zeros(length(N), 1);
+for i = 1:length(N)
+    test_seq = test_matrix(i, :);
+    % this is to delete ill-behaved test statistics (due to var-cov matrix)
+    % test_seq = test_seq(~isnan(test_seq) & imag(test_seq) == 0);
+    test_seq = test_seq(~isnan(test_seq));
+    % compute the actual size
+    real(i) = sum(test_seq > cv)/length(test_seq);
+    % compute the length of sequence
+    l(i) = length(test_seq);
+end
+end
