@@ -13,3 +13,7 @@ This package contains the following files.
 3. Run monte_carlo_main.m from the command prompt. A sample script file (run_monte_carlo_main.sh) is also contained in this directory.
 4. Similarly, run Simulation_BCS.m.
 5. Run summarize_results.m.
+
+# License
+- The codes are provided under the MIT license. Please see license.txt in this repository.
+- This package is intended to replicate the results in Chen and Kaido (2023). As such, the users should not add changes to the main branch. If you want to make changes, please fork this repository and work on your changes.
