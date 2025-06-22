@@ -723,3 +723,207 @@ for i = 1:length(N)
     l(i) = length(test_seq);
 end
 end
+
+% ###############
+% add in new functions to implement referee's request
+function [] = monte_carlo_main_q1_arbitrary_selection(ncores,varargin)
+    % The size part is exactly the same
+    % the power part change is in the rmle part: the arbitrary selection closes the model and allows to estimate nuisance 
+
+    %% Inputs %%
+    % ncores: # of CPUs used for parallelization
+    % step  : 'first_stage' 'second_stage_est', 'second_stage_true', or 'power'
+    % Choose one of them to decide which part of the program to debug.
+    %
+    % This file conducts Monte Carlo Simulations for project "Robust Test Score
+    % for Incomplete Models with Nuisance Parameters"
+    rng(123)
+    S = 1999; % number of simulations for each sample size
+    parpool(ncores)
+    
+    % Size evaluation
+    covariate = [1, -1];
+    % true value of nuisance parameters
+    delta = [0.25, 0.25];
+    level = 0.05; % nominal size
+    N = [2500, 5000, 7500];
+    J = length(N);
+    X = [1,1; 1,-1; -1,1; -1,-1]; % combination of covariates
+    % pre-allocation to store g_delta statstics and sup test statistic
+    gn = zeros(2*length(N), S);
+    test = zeros(length(N), S);
+    outcome_com = zeros(16,S,length(N));
+    delta_hat_com1 = zeros(length(N),S);
+    delta_hat_com2 = zeros(length(N),S);
+    cv = zeros(length(N),S);
+    for j = 1:length(N) % loop over sample size
+        n = N(j);
+        % Call data_generation function to generate data
+        [data_com, x1_com, x2_com] = data_generation([0, 0], covariate, ...
+            delta, n, S, 'Complete');
+        outcome_com(:,:,j) = counting(data_com, x1_com, x2_com);
+        % loop over number of simulations
+        gn_temp = zeros(2,S);
+        parfor i = 1:S
+            % Conduct Restricted MLE
+            delta_hat_com = rmle([0,0], n, 'BFGS', data_com(:,i), x1_com(:,i), x2_com(:,i));
+            delta_hat_com1(j,i) = delta_hat_com(1);
+            delta_hat_com2(j,i) = delta_hat_com(2);
+            % generate var-cov matrices and gn statistics (generated under the null beta=0)
+            %[test(j,i),gn_temp(:,i), varI] = stat(delta_hat_com, X, outcome_com(:,i,j), n,lambda);
+            [test(j,i),gn_temp(:,i), varI] = stat_ab(delta_hat_com, X, outcome_com(:,i,j), n);
+            cv(j,i) = crt_ab(level,varI);
+        end
+        gn((2*j-1):(2*j),:) = gn_temp;
+    end
+    rej = test > cv;
+    size = sum(rej,2)./S;
+    disp(size)
+    filename = ['../Results/Matfiles/test_crt_S' num2str(S) '.mat'];
+    save(filename)
+    
+    %% Power Evaluation
+    %% Random Number Generation %%
+    rng(123); % set seed
+    n = 7500;
+    X = [1,1; 1,-1; -1,1; -1,-1]; % combination of covariates
+    DGP = 'LFP';
+    selection_prob_list = [0, 0.1, 0.2, 0.5, 1];
+    num_selection = length(selection_prob_list);
+    % pre-define alternatives
+    h_alt  = -(eps:0.5:15)';
+    h_alt2 = -(eps:0.5:15)';
+    K = length(h_alt);
+    % pre-allocation to store sup test statistic for each selection mechanism
+    test = zeros(num_selection, K, S);
+    cv   = zeros(num_selection, K,S);
+    for k=1:K
+        % Define true beta that generates the data (Change between beta_alt
+        % and beta_alt2 in the data_generation function)
+        beta_alt = h_alt(k,:)/sqrt(n);
+        beta_alt2 = h_alt2(k,:)/sqrt(n);
+        % Call data_generation function to generate data
+        [data, x1, x2] = data_generation([beta_alt,beta_alt2], covariate, ...
+            delta, n, S, DGP);
+        outcome = counting(data, x1, x2);
+        for pi = 1:num_selection:
+            % loop over number of simulations
+            parfor i = 1:S
+                % Conduct Restricted MLE
+                delta_hat = rmle_q1_arbitrary_selection(data(:,i), x1(:,i), x2(:,i), [beta_alt,beta_alt2], selection_prob_list[pi]);
+                % generate var-cov matrices and gn statistics (generated under the null beta=0)
+                [test(pi,k,i), ~,varI_iid] = stat_ab(delta_hat, X, outcome(:,i), n);
+                cv(pi,k,i) = crt_ab(level,varI_iid);
+            end
+        end
+    end
+    date = datestr(now, 'yyyy_mm_dd_HH_MM_SS');
+    filename = ['../Results/Matfiles/test_power_DGP' DGP '_n' num2str(n) '_S' num2str(S) '_pi' '_' date '.mat'];
+    save(filename)
+    
+end
+
+
+function Q1 = obj_q1_arbitrary_selection(data, x1, x2, delta, beta, selection_prob)
+    % GET_ARBITRARY_ALTERNATIVE_LIKELIHOOD Modified to follow get_LFP_q0 structure
+    %
+    % This function follows the exact same structure as get_LFP_q0 but includes
+    % beta parameters and selection probability for the referee's approach
+    %
+    % INPUTS:
+    %   data          - market outcome (n by 1)
+    %   x1            - Covariate for player 1 (n x 1)
+    %   x2            - Covariate for player 2 (n x 1)  
+    %   delta         - Nuisance parameters [delta1, delta2] (1 x 2)
+    %   beta          - Strategic parameters [beta1, beta2] (1 x 2)
+    %   selection_prob - Selection probability π ∈ [0,1] for (1,0) vs (0,1)
+    %
+    % OUTPUT:
+    %   Q1            - Distribution under alternative [q1_00, q1_11, q1_10, q1_01]
+    %                   Dimension: n x 4 (same format as get_LFP_q0)
+    
+    % Compute xdelta (same as get_LFP_q0)
+    xdelta1 = x1*delta(1);
+    xdelta2 = x2*delta(2);
+    
+    % Get dimensions (same as get_LFP_q0)
+    dim = size(xdelta1);
+    n = dim(1);
+    S = dim(2);
+    
+    % Compute CDFs at thresholds (same as get_LFP_q0, but add beta terms)
+    Phi1 = normcdf(xdelta1);                    % Φ(x1'δ1)
+    Phi2 = normcdf(xdelta2);                    % Φ(x2'δ2)
+    Phi_beta1 = normcdf(xdelta1 + beta(1));     % Φ(x1'δ1 + β1)
+    Phi_beta2 = normcdf(xdelta2 + beta(2));     % Φ(x2'δ2 + β2)
+    
+    % Extract selection probability
+    pi = selection_prob;
+    
+    % Compute multiple equilibrium region
+    Delta = (Phi1 - Phi_beta1) .* (Phi2 - Phi_beta2);
+    
+    % Compute probabilities for each outcome (same format as get_LFP_q0)
+    % Following referee's equation (1) from the report:
+    
+    % q1_00: Outcome (0,0) - Both players don't enter
+    q1_00 = (1 - Phi1) .* (1 - Phi2);
+    
+    % q1_11: Outcome (1,1) - Both players enter  
+    q1_11 = Phi_beta1 .* Phi_beta2;
+    
+    % q1_10: Outcome (1,0) - Only player 1 enters
+    % Base probability + share of multiple equilibrium region allocated to (1,0)
+    q1_10 = (1 - Phi2) .* Phi1 + ...
+            Phi_beta1 .* (Phi2 - Phi_beta2) + ...
+            (1 - pi) .* Delta;
+    
+    % q1_01: Outcome (0,1) - Only player 2 enters  
+    % Base probability + share of multiple equilibrium region allocated to (0,1)
+    q1_01 = (1 - Phi1) .* Phi2 + ...
+            Phi_beta2 .* (Phi1 - Phi_beta1) + ...
+            pi .* Delta;
+    
+    % Return in same format as get_LFP_q0: [q_00, q_11, q_10, q_01]
+    Q1 = [reshape(q1_00, n*S, 1), reshape(q1_11, n*S, 1), ...
+          reshape(q1_10, n*S, 1), reshape(q1_01, n*S, 1)];
+    
+    % construct the negative log likelihood function
+    temp1 = zeros(size(data));
+    temp2 = zeros(size(data));
+    temp3 = zeros(size(data));
+    temp4 = zeros(size(data));
+    temp1(data == 0) = 1;
+    temp2(data == 11) = 1;
+    temp3(data == 10) = 1;
+    temp4(data == 1) = 1;
+    temp = [temp1, temp2, temp3, temp4];
+    % objective function
+    f = -sum(sum(temp .* Q1));
+
+end
+
+
+% Calculates the restricted mle
+% Under the restriction beta1 = beta2 = 0.
+function [delta] = rmle_q1_arbitrary_selection(data, x1, x2, beta, selection_prob)
+    % Input:
+    %   beta:           structural parameters of interest under restriction (0,0)
+    %   delta_initial:  initial guess of coefficients of covariates (1 by 2)
+    %   n:              sample size
+    %   outcome:        the 16 by S matrix that stores the number of
+    %                   occurrences of each combination of events and covariate
+    %                   configurations
+    %   algorithm:      the algorithm for estimation: BFGS, LM-BFGS or BHHH
+    % Output:
+    %   delta:          estimates of parameters (1 by 2)
+    % Objective function
+    f = @(delta_est) obj_q1_arbitrary_selection(data, x1, x2, delta_est, beta, selection_prob)
+    % Setting Options
+    % Once gradient is supplied, switch to trust region algorithm
+    options = optimoptions('fminunc','Algorithm','trust-region','SpecifyObjectiveGradient',true);
+    %initial = [1;1];
+    % Call fminunc
+    delta = fminunc(f, delta_initial', options);
+        
+end
